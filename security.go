@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/valyala/fasthttp"
 )
 
 // Signature headers
@@ -52,6 +54,33 @@ func unsafeSignatureVerifier(header http.Header, secret string) (_ SecretsVerifi
 	}, nil
 }
 
+func unsafeSignatureVerifierFastHttp(header fasthttp.RequestHeader, secret string) (_ SecretsVerifier, err error) {
+	var (
+		bsignature []byte
+	)
+
+	signature := header.Peek(hSignature)
+	stimestamp := header.Peek(hTimestamp)
+
+	if len(signature) == 0 || len(stimestamp) == 0 {
+		return SecretsVerifier{}, ErrMissingHeaders
+	}
+
+	if bsignature, err = hex.DecodeString(strings.TrimPrefix(string(signature), "v0=")); err != nil {
+		return SecretsVerifier{}, err
+	}
+
+	hash := hmac.New(sha256.New, []byte(secret))
+	if _, err = hash.Write([]byte(fmt.Sprintf("v0:%s:", stimestamp))); err != nil {
+		return SecretsVerifier{}, err
+	}
+
+	return SecretsVerifier{
+		signature: bsignature,
+		hmac:      hash,
+	}, nil
+}
+
 // NewSecretsVerifier returns a SecretsVerifier object in exchange for an http.Header object and signing secret
 func NewSecretsVerifier(header http.Header, secret string) (sv SecretsVerifier, err error) {
 	var (
@@ -65,6 +94,29 @@ func NewSecretsVerifier(header http.Header, secret string) (sv SecretsVerifier, 
 	}
 
 	if timestamp, err = strconv.ParseInt(stimestamp, 10, 64); err != nil {
+		return SecretsVerifier{}, err
+	}
+
+	diff := absDuration(time.Since(time.Unix(timestamp, 0)))
+	if diff > 5*time.Minute {
+		return SecretsVerifier{}, ErrExpiredTimestamp
+	}
+
+	return sv, err
+}
+
+func NewSecretsVerifierFastHttp(header fasthttp.RequestHeader, secret string) (sv interface{}, err error) {
+	var (
+		timestamp int64
+	)
+
+	stimestamp := header.Peek(hTimestamp)
+
+	if sv, err = unsafeSignatureVerifierFastHttp(header, secret); err != nil {
+		return SecretsVerifier{}, err
+	}
+
+	if timestamp, err = strconv.ParseInt(string(stimestamp), 10, 64); err != nil {
 		return SecretsVerifier{}, err
 	}
 
